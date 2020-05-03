@@ -5,7 +5,7 @@
 SPHINXOPTS    =
 SPHINXBUILD   = sphinx-build
 PAPER         =
-BUILDDIR      = _build
+BUILDDIR      = build
 
 # Internal variables.
 PAPEROPT_a4     = -D latex_elements.papersize=a4
@@ -55,6 +55,14 @@ html:
 	$(SPHINXBUILD) -b html $(ALLSPHINXOPTS) $(BUILDDIR)/html
 	@echo
 	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."
+
+.PHONY: docs
+docs:
+	@make clean
+	@rm -r html
+	@make html
+	@mkdir html
+	@cp -r _build/html/* html
 
 .PHONY: dirhtml
 dirhtml:
@@ -239,3 +247,19 @@ dummy:
 	$(SPHINXBUILD) -b dummy $(ALLSPHINXOPTS) $(BUILDDIR)/dummy
 	@echo
 	@echo "Build finished. Dummy builder generates no files."
+
+python-deps:
+	@cat requirements.txt | xargs -n 1 -L 1 pip3 install
+
+_add_jekyll:
+	touch build/.nojekyll
+
+build: python-deps html _add_jekyll
+
+open:
+	@echo "test"
+	open ${BUILDDIR}/html/index.html
+
+see: html open
+
+.PHONY: python-deps build open see
