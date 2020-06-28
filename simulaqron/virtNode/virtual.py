@@ -1402,7 +1402,7 @@ class virtualQubit(pb.Referenceable):
                     try:
                         yield self.simQubit.lock()
                         if self.simQubit.active:
-                            getattr(self.simQubit, localName)(*args)
+                            getattr(self.simQubit, localName)(*args) ### Calling remote_apply !!
                             waiting = False
                             outcome = True
                     except Exception as e:
@@ -1737,6 +1737,22 @@ class virtualQubit(pb.Referenceable):
         except Exception as err:
             raise err
 
+
+    @inlineCallbacks
+    def remote_toffoli(self, control, target):
+        """
+        Performs a TOFFOLI operation with this qubit as control, and the other qubit as target.
+
+        Arguments
+        target		the virtual qubit to use as the target of the TOFFOLI
+        """
+
+        try:
+            success = yield self._three_qubit_gate(control, target, "toffoli")
+            return success
+        except Exception as err:
+            raise err
+
     @inlineCallbacks
     def remote_cphase_onto(self, target):
         """
@@ -1983,6 +1999,254 @@ class virtualQubit(pb.Referenceable):
             self.virtNode.root.reraise_remote_error(remote_err)
         except Exception as e:
             logging.error("VIRTUAL NODE %s: Cannot perform two qubit gate %s:", self.virtNode.name, e)
+            raise e
+
+        finally:
+            # We need to release all the locks, no matter what happened
+            yield self._unlock_inreg(self)
+            yield self._unlock_inreg(target)
+            yield self._unlock_nodes(q1simNode, q1virtNode, q2simNode, q2virtNode)
+
+        return True
+
+    @inlineCallbacks
+    def _three_qubit_gate(self, control, target, name):
+        """
+        Perform a two qubit gate including all the required locking.
+
+        Arguments
+        target		second virtual qubit (beyond self which is the first)
+        name		name of the gate to perform
+        """
+
+        if self.active != 1 or target.active != 1:
+            logging.error("VIRTUAL NODE %s: Attempt to manipulate qubits no longer at this node.", self.virtNode.name)
+            return
+
+        localName = "".join(["remote_", name])
+        logging.debug(
+            "VIRTUAL NODE %s: Doing 3 qubit gate name %s and local call %s", self.virtNode.name, name, localName
+        )
+
+        # Before we proceed, we need to acquire the gobal locks of the nodes holding the
+        # registers of both qubits. We wrap this in a timeout with random repeat since there is
+        # otherwise the possibility of a deadlock if two nodes compete for the _two_ locks
+        waiting = True
+        attempts = 0
+        try:
+            while waiting and attempts <= self.virtNode.root.maxAttempts:
+
+                # Set up the timeout at a random time between 1s and 4s later
+                timeoutD = Deferred()
+                timeup = reactor.callLater(random.uniform(1, 4), timeoutD.callback, None)
+
+                # Check if self simNode is locked
+                if self.simNode == self.virtNode:
+                    self_isLocked = self.simNode.root._lock.locked
+                else:
+                    self_isLocked = yield self.simNode.root.callRemote("isLocked")
+                # Check if other simNode is locked
+                if target.simNode == target.virtNode:
+                    other_isLocked = target.simNode.root._lock.locked
+                else:
+                    other_isLocked = yield target.simNode.root.callRemote("isLocked")
+
+                if self_isLocked:
+                    logging.debug(
+                        "VIRTUAL NODE {}: This SimNode {} already locked. Need to wait.".format(
+                            self.virtNode.name, self.simNode.name
+                        )
+                    )
+                    yield timeoutD
+                    attempts += 1
+                elif other_isLocked:
+                    logging.debug(
+                        "VIRTUAL NODE {}: Other SimNode {} already locked. Need to wait.".format(
+                            self.virtNode.name, target.simNode.name
+                        )
+                    )
+                    yield timeoutD
+                    attempts += 1
+
+                else:
+
+                    # Set up the lock acquisition
+                    lockD = self._lock_nodes(target)
+
+                    try:
+                        # Yield on both of them
+                        gotLock, timeoutRes = yield DeferredList(
+                            [lockD, timeoutD], fireOnOneCallback=True, fireOnOneErrback=True, consumeErrors=True
+                        )
+                    except Exception as e:
+                        logging.debug("VIRTUAL NODE %s: Cannot get lock %s", self.virtNode.name, e)
+                        yield self._unlock_nodes(self.simNode, self.virtNode, target.simNode, target.virtNode)
+                        timeup.cancel()
+                        return
+                    else:
+                        if timeoutD.called:
+                            logging.debug("VIRTUAL NODE %s: Timing out getting locks.", self.virtNode.name)
+                            lockD.cancel()
+                            yield self._unlock_nodes(self.simNode, self.virtNode, target.simNode, target.virtNode)
+                            attempts = attempts + 1
+                        elif lockD.called:
+                            waiting = False
+                            timeup.cancel()
+        except RemoteError as remote_err:
+            self.virtNode.root.reraise_remote_error(remote_err)
+        except Exception as err:
+            raise err
+
+        # We have now acquired the two relevant global node locks. If more than one qubit is locked, all code
+        # will first acquire the global lock, so this should be safe from deadlocks now, so we will not timeout
+
+        try:
+            yield self._lock_inreg(self)
+            yield self._lock_inreg(target)
+            yield self._lock_inreg(control) 
+        except Exception as err:
+            raise err
+
+        # When merging registers, we may need to update the virtual qubits. Remember the original ones so we can
+        # send appropriate unlocks below. (note this assignment must be done after the locks are acquired)
+        q1simNode = self.simNode
+        q1virtNode = self.virtNode
+        q2simNode = target.simNode
+        q2virtNode = target.virtNode
+
+        q3simNode  = control.simNode
+        q3virtNode = control.virtNode
+
+
+        # Todo a 2 qubit gate, both qubits must be in the same simulated register. We will merge
+        # registers if this is not already the case.
+        
+        try:
+            if self.simNode == target.simNode:
+                # Both qubits are simulated at the same node
+
+                if self.simNode == self.virtNode:
+                    # Both qubits are both locally simulated, check whether they are in the same register
+
+                    if self.simQubit.register == target.simQubit.register:
+                        # They are even in the same register, just do the gate
+                        getattr(self.simQubit, localName)(target.simQubit.num)
+                    else:
+                        logging.debug("VIRTUAL NODE %s: 3 qubit command demands register merge.", self.virtNode.name)
+                        # Both are local but not in the same register
+                        self.simNode.root.local_merge_regs(self.simQubit, control.simQubit)
+                        self.simNode.root.local_merge_regs(self.simQubit, target.simQubit)
+                                                
+                        # After the merge, just do the gate
+                        getattr(self.simQubit, localName)(control.simQubit.num, target.simQubit.num)
+                else:
+                    # Both are remotely simulated
+                    logging.debug("VIRTUAL NODE %s: 2qubit command demands remote register merge.", self.virtNode.name)
+
+                    # Fetch the details of the two simulated qubits from remote
+                    (fNum, fNode) = yield self.simQubit.callRemote("get_details")
+                    (tNum, tNode) = yield target.simQubit.callRemote("get_details")
+
+                    # Sanity check: we really have the right simulating node
+                    if fNode != self.simNode.name or tNode != target.simNode.name:
+                        logging.error("VIRTUAL NODE %s: Inconsistent simulation. Cannot merge.", self.myID.name)
+                        raise quantumError("Inconsistent simulation")
+
+                    # Merge the remote register according to the simulation IDs of the qubits
+                    yield self.simNode.root.callRemote("merge_regs", fNum, tNum)
+
+                    # Get the number of the target in the new register
+                    targetNum = yield target.simQubit.callRemote("get_number")
+
+                    # Execute the 2 qubit gate
+                    yield self.simQubit.callRemote(name, targetNum)
+                    logging.debug(
+                        "VIRTUAL NODE %s: Remote 2qubit command to %s.", self.virtNode.name, target.simNode.name
+                    )
+            else:
+                # They are simulated at two different nodes
+
+                if self.simNode == self.virtNode:
+
+                    # We are the locally simulating node of the first qubit, merge all to us
+                    logging.debug(
+                        "VIRTUAL NODE %s: 2qubit command demands merge from remote target sim %s to us.",
+                        self.simNode.name,
+                        target.simNode.name,
+                    )
+                    (fNum, fNode) = yield target.simQubit.callRemote("get_details")
+                    if fNode != target.simNode.name:
+                        logging.error("VIRTUAL NODE %s: Inconsistent simulation. Cannot merge.", self.myID.name)
+                        raise quantumError("Inconsistent simulation.")
+                    target.simQubit = yield self.simNode.root.remote_merge_from(
+                        target.simNode.name, fNum, self.simQubit.register
+                    )
+
+                    # Get the number of the target in the new register
+                    targetNum = target.simQubit.num
+
+                    # Execute the 2 qubit gate
+                    getattr(self.simQubit, localName)(targetNum, targetNum)
+
+                elif target.simNode == target.virtNode:
+
+                    # We are the locally simulating node of the target qubit, merge all to us
+                    logging.debug(
+                        "VIRTUAL NODE %s: 2qubit command demands merge from remote sim %s to us.",
+                        target.simNode.name,
+                        self.simNode.name,
+                    )
+                    (fNum, fNode) = yield self.simQubit.callRemote("get_details")
+                    if fNode != self.simNode.name:
+                        logging.error("VIRTUAL NODE %s: Inconsistent simulation. Cannot merge.", self.myID.name)
+                        raise quantumError("Inconsistent simulation.")
+                    self.simQubit = yield target.simNode.root.remote_merge_from(
+                        self.simNode.name, fNum, target.simQubit.register
+                    )
+
+                    # Get the number of the target in the new register
+                    targetNum = target.simQubit.num
+
+                    # Execute the 3 qubit gate
+                    getattr(self.simQubit, localName)(targetNum, targetNum)
+
+                else:
+                    # Both qubits are remotely simulated - we will pull both registers to become one local register
+                    logging.debug(
+                        "VIRTUAL NODE %s: 2qubit command demands total remote merge from %s and %s.",
+                        self.virtNode.name,
+                        target.simNode.name,
+                        self.simNode.name,
+                    )
+
+                    # Create a new local register
+                    newLocalReg = self.virtNode.root.remote_add_register()
+
+                    # Fetch the detail of the two registers from remote
+                    (fNum, fNode) = yield self.simQubit.callRemote("get_details")
+                    if fNode != self.simNode.name:
+                        logging.error("VIRTUAL NODE %s: Inconsistent simulation. Cannot merge.", self.myID.name)
+                        raise quantumError("Inconsistent simulation.")
+                    (tNum, tNode) = yield target.simQubit.callRemote("get_details")
+                    if tNode != target.simNode.name:
+                        logging.error("VIRTUAL NODE %s: Inconsistent simulation. Cannot merge.", self.myID.name)
+                        raise quantumError("Inconsistent simulation.")
+
+                    # Pull the remote registers to this node
+                    self.simQubit = yield self.virtNode.root.remote_merge_from(self.simNode.name, fNum, newLocalReg)
+                    target.simQubit = yield target.virtNode.root.remote_merge_from(
+                        target.simNode.name, tNum, newLocalReg
+                    )
+                    # Get the number of the target in the new register
+                    targetNum = target.simQubit.num
+
+                    # Finally, execute the two qubit gate
+                    logging.debug("RUN GATE")
+                    getattr(self.simQubit, localName)(targetNum, targetNum)
+        except RemoteError as remote_err:
+            self.virtNode.root.reraise_remote_error(remote_err)
+        except Exception as e:
+            logging.error("VIRTUAL NODE %s: Cannot perform three qubit gate %s:", self.virtNode.name, e)
             raise e
 
         finally:

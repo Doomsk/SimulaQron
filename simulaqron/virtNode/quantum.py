@@ -207,7 +207,20 @@ class simulatedQubit(pb.Referenceable):
         self._apply_random_pauli_noise()
         self.register.apply_CNOT(self.num, targetNum)
 
-    def remote_cphase_onto(self, targetNum):
+    def remote_toffoli(self, control, target):
+        """
+        Performs a TOFFOLI operation with this qubit as control, and the other qubit as target.
+
+        Arguments
+        target    the qubit to use as the target  of the TOFFOLI
+        control   the qubit to use as the second control of the TOFFOLI
+        """
+
+        logging.debug("VIRTUAL NODE %s: TOFFOLI from %d to %d", self.node.name, self.num, target)
+        self._apply_random_pauli_noise()
+        self.register.apply_TOFFOLI(self.num, control, target)
+
+    def remote_cphase(self, targetNum):
         """
         Performs a CPHASE operation with this qubit as control, and the other qubit as target.
 

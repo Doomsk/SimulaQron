@@ -226,6 +226,17 @@ class qutipEngine(quantumEngine):
         # Apply it to the desired qubits
         self.apply_twoqubit_gate(cnot, qubitNum1, qubitNum2)
 
+    def apply_TOFFOLI(self, qubitNum1, qubitNum2, qubitNum3):
+        """
+        Applies the TOFFOLI to the qubit with the numbers qubitNum1 and qubitNum2.
+        """
+        # Construct the TOFFOLI matrix NEED TO CHANGE !!!!!!!!!!!!!
+
+        toffoli = qp.Qobj([[1, 0, 0, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0, 0, 0], [0, 0, 0, 1, 0, 0, 0, 0], [0, 0, 0, 0, 1, 0, 0, 0], [0, 0, 0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 1, 0]], dims=[[2, 2, 2], [2, 2, 2]])
+
+        # Apply it to the desired qubits
+        self.apply_threequbit_gate(toffoli, qubitNum1, qubitNum2, qubitNum3)
+
     def apply_CPHASE(self, qubitNum1, qubitNum2):
         """
         Applies the CPHASE to the qubit with the numbers qubitNum1 and qubitNum2.
@@ -277,6 +288,31 @@ class qutipEngine(quantumEngine):
         self.qubitReg.dims = [dimL, dimL]
 
         # Apply the unitary
+        self.qubitReg = overallU * self.qubitReg * overallU.dag()
+
+    def apply_threequbit_gate(self, gateU, qubit1, qubit2, qubit3):
+        """
+        Applies a unitary gate to the two specified qubits.
+
+        Arguments:
+        gateU		unitary to apply as Qobj
+        qubit1 		the first qubit
+        qubit2		the second qubit
+        """
+        # Construct the overall unitary
+        overallU = qp.gate_expand_3toN(gateU, 3, [qubit1, qubit2], qubit3)
+
+        # Qutip distinguishes between system dimensionality and matrix dimensionality
+        # so we need to make sure it knows we are talking about multiple qubits
+        k = int(math.log2(overallU.shape[0]))
+        dimL = []
+        for j in range(k):
+            dimL.append(2)
+
+        overallU.dims = [dimL, dimL]
+        self.qubitReg.dims = [dimL, dimL]
+
+        # Apply the  unitary
         self.qubitReg = overallU * self.qubitReg * overallU.dag()
 
     def apply_twoqubit_gate(self, gateU, qubit1, qubit2):

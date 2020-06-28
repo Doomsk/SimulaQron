@@ -335,6 +335,22 @@ class SimulaqronCQCHandler(CQCMessageHandler):
                 self.create_return_message(cqc_header.app_id, CQC_ERR_GENERAL, cqc_version=cqc_header.version))
             return False
 
+    def cmd_toffoli(self, cqc_header, cmd, xtra, xtra_control):
+        """
+        Apply TOFFOLI Gate
+        """
+        try:
+            return self.apply_three_qubit_gate(cqc_header, cmd, xtra, xtra_control,"toffoli")
+        except Exception as err:
+            logging.error(
+                "Following error occurred when trying to apply a TOFFOLI gate to qubit {} and {}: Error: {}".format(
+                    cmd.qubit_id, xtra.qubit_id, err
+                )
+            )
+            self.return_messages[cqc_header.app_id].append(
+                self.create_return_message(cqc_header.app_id, CQC_ERR_GENERAL, cqc_version=cqc_header.version))
+            return False
+
     def cmd_cnot(self, cqc_header, cmd, xtra):
         """
         Apply CNOT Gate
@@ -1279,6 +1295,49 @@ class SimulaqronCQCHandler(CQCMessageHandler):
 
         try:
             success = yield control.callRemote(gate, target)
+            if success is False:
+                err_msg = self.create_return_message(cqc_header.app_id, CQC_ERR_UNSUPP, cqc_version=cqc_header.version)
+                self.return_messages[cqc_header.app_id].append(err_msg)
+                return False
+        except Exception as e:
+            raise e
+
+        return True
+
+    @inlineCallbacks
+    def apply_three_qubit_gate(self, cqc_header, cmd, xtra, xtra_control, gate):
+        if not xtra:
+            logging.warning("CQC %s: Missing XTRA Header", self.name)
+            err_msg = self.create_return_message(cqc_header.app_id, CQC_ERR_UNSUPP, cqc_version=cqc_header.version)
+            self.return_messages[cqc_header.app_id].append(err_msg)
+            return False
+        #
+        logging.debug(
+            "CQC %s: Applying %s to App ID %d qubit id %d target %d control %d",
+            self.name,
+            gate,
+            cqc_header.app_id,
+            cmd.qubit_id,
+            xtra.qubit_id,
+            xtra_control.qubit_id,
+        )
+        try:
+            control   = self.get_virt_qubit(cqc_header, cmd.qubit_id)
+            target    = self.get_virt_qubit(cqc_header, xtra.qubit_id)
+            control2  = self.get_virt_qubit(cqc_header, xtra_control.qubit_id)
+        except UnknownQubitError as e:
+            logging.debug(e)
+            err_msg = self.create_return_message(cqc_header.app_id, CQC_ERR_NOQUBIT, cqc_version=cqc_header.version)
+            self.return_messages[cqc_header.app_id].append(err_msg)
+            return False
+        # Return an error if the control and target are equal, can not do this
+        if control == target:
+            err_msg = self.create_return_message(cqc_header.app_id, CQC_ERR_UNSUPP, cqc_version=cqc_header.version)
+            self.return_messages[cqc_header.app_id].append(err_msg)
+            return False
+
+        try:
+            success = yield control.callRemote(gate, control2, target)
             if success is False:
                 err_msg = self.create_return_message(cqc_header.app_id, CQC_ERR_UNSUPP, cqc_version=cqc_header.version)
                 self.return_messages[cqc_header.app_id].append(err_msg)
