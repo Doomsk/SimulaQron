@@ -185,6 +185,14 @@ class quantumEngine(pb.Referenceable):
         pass
 
     @abc.abstractmethod
+    def apply_TOFFOLI(self, qubitNum1, qubitNum2):
+        """
+        Applies the TOFFOLI to the qubit with the numbers qubitNum1 and qubitNum2.
+        :rtype: None
+        """
+        pass
+
+    @abc.abstractmethod
     def apply_CPHASE(self, qubitNum1, qubitNum2):
         """
         Applies the CPHASE to the qubit with the numbers qubitNum1 and qubitNum2.
